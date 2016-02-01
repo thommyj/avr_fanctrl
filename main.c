@@ -1,23 +1,32 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#define F_CPU 9600000UL
-#include <util/delay.h>
 
-uint8_t volatile mcuTime = 0;
-uint16_t volatile tickCnt = 0;
-uint8_t setPoint = 0; 
-uint8_t pot[4] = {0x55, 0x55, 0x55, 0x55};
-uint8_t potCnt = 0;
-uint8_t uartChar = 0xFF;
-uint8_t volatile uartBusy = 0;
-uint8_t volatile enableInt0Time = 0;
-uint8_t volatile timeBetweenEdges = 0;
+#define EDGE_IDLE     (0)
+#define EDGE_START    (9)
 
 #define STARTBIT (10)
 #define STOPBIT   (1)
 #define IDLE      (0)
-/*
- */
+
+uint8_t volatile mcuTime = 0;
+uint16_t volatile tickCnt = 0;
+uint8_t setPoint = 0;
+uint8_t actualValue = 0x55;
+uint8_t pot[4] = {0x55, 0x55, 0x55, 0x55};
+uint8_t potCnt = 0;
+uint8_t uartChar = 0xFF;
+uint8_t volatile uartBusy = 0;
+uint8_t volatile int0EnableTime = 0;
+uint16_t volatile timeBetweenEdges = 0;
+uint8_t volatile edgeStatus;
+void uart_putc_nonblocking(char c)
+{
+	if(uartBusy)
+		return;
+	uartChar = c;
+	uartBusy = STARTBIT;
+}
+
 ISR(TIM0_OVF_vect)
 {
 	static uint8_t nextTick = 37;
@@ -63,6 +72,32 @@ ISR(TIM0_OVF_vect)
 
 ISR(INT0_vect)
 {
+	static uint16_t startEdgeTick;
+	static uint16_t lastEdgeTick;
+
+	PINB |= (1 << PB3);
+	
+	if(edgeStatus == EDGE_START) {
+		/* this is the first edge */
+		startEdgeTick = tickCnt;
+		lastEdgeTick = tickCnt;
+		edgeStatus--;
+	}else{	
+		/*
+	  	 * with min 750 rpm and max 3000 rpm, there should be
+	 	 * between 750 -180 ~ 900 - 150 ticks between two edges
+	 	 */
+		uint16_t tmp = (tickCnt - lastEdgeTick);
+		if (tmp < 150 || tmp > 900) {
+			/* somethings not right, remove sample */
+			startEdgeTick += (tickCnt - lastEdgeTick);
+			uart_putc_nonblocking('b');
+		} else {
+			edgeStatus--;
+			timeBetweenEdges = (tickCnt - startEdgeTick);	
+		}
+		lastEdgeTick = tickCnt;
+	}
 	/*
 	 * max rpm <3000rpm => 3000/60*2=100Hz
 	 *---      --------      ---
@@ -73,34 +108,8 @@ ISR(INT0_vect)
 	 * interrupt earlier than 1/100*1/2*5/6=4.17ms from now
 	 *
 	 */
-	uint8_t rpm = PINB & (1 << PB1);
-	static uint8_t  nextEdge = (1 << PB1);
-	static uint16_t startEdgeTick = 0;
-
-	/* not expected edge? must be a spurious wakeup */
-	if (rpm != nextEdge) {
-		enableInt0Time = 4;
-		PINB |= (1 << PB3);
-		nextEdge ^= (1 << PB1);
-		GIMSK = ~(1 << INT0);
-		/*
-	 	 * with min 750 rpm and max 3000 rpm, there should be
-	 	 * between 750 -180 ~ 750 - 238 ticks between two edges
-		 * scale and shift this values to 0 - 256
-	 	 */
-		uint16_t tmp = (tickCnt - startEdgeTick);
-		if (tmp <= 238) {
-			timeBetweenEdges = 1;
-		} else {
-			tmp = (tmp - 238) >> 1;
-			if (tmp > 255) {
-				timeBetweenEdges = 255;
-			} else {
-				timeBetweenEdges = (uint8_t)tmp;
-			}
-		}
-		startEdgeTick = tickCnt;
-	}
+	int0EnableTime = mcuTime + 4;
+	GIMSK = ~(1 << INT0);
 }
 
 /*
@@ -113,6 +122,7 @@ void uart_putc(char c)
 	uartChar = c;
 	uartBusy = STARTBIT;
 }
+
 
 void uart_putuint8(uint8_t i)
 {
@@ -154,20 +164,6 @@ void updateSetPoint (void)
 		setPoint = 5;
 	} else {
 		setPoint = averagePot; //TODO: should be rpm, not adc
-	}
-}
-
-void do2msWork ()
-{
-	if (enableInt0Time) {
-
-		enableInt0Time--;
-		enableInt0Time--;
-
-		if (enableInt0Time == 0) {
-			GIFR  |= (1 << INTF0);
-			GIMSK |= (1 << INT0);
-		}
 	}
 }
 
@@ -227,23 +223,42 @@ int main (void)
 	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1);
 
 	sei();
+	edgeStatus = EDGE_START;
 	currentTime = mcuTime;
 	while(1) {
 		while(currentTime == mcuTime) {
 			/* paus work */
-			//printing three charaters take 1ms
-			if(currentTime > (mcuTime + 1)) {
-				uart_putuint8(timeBetweenEdges);
-				uart_putc('\n');
-			}
 		}
 		currentTime = mcuTime;
-		if ((currentTime & 0x1) == 0) {
-			do2msWork();
+		
+		if (int0EnableTime == currentTime && edgeStatus != EDGE_IDLE) {
+			GIFR  |= (1 << INTF0);
+			GIMSK |= (1 << INT0);
 		}
 
 		if ((currentTime & 0x7) == 0) {
 			do8msWork();
+		}
+
+		if (currentTime == 255) {
+			if (edgeStatus == EDGE_IDLE) {
+				/* ticks are between 150 to 900 per edge, 8 edges so
+				 * 1200 < timeBetweenEdges < 7200, scale down and shift
+				 * to 0 -255. (7200-1200)/256~3 ~> t/4+t/16
+				 */
+				uint16_t tmp = (timeBetweenEdges - 1200) >> 3;
+				tmp = (tmp>>2) + (tmp>>4);
+				if (tmp > 255) {
+					actualValue = 255;
+				} else {
+					actualValue = (uint8_t)tmp;
+				}
+				GIFR  |= (1 << INTF0);
+				GIMSK |= (1 << INT0);
+				edgeStatus = EDGE_START;
+			}
+			uart_putuint8(actualValue);
+			uart_putc('\n');
 		}
 	}
 	return 0;
