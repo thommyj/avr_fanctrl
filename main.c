@@ -10,15 +10,18 @@
 
 uint8_t volatile mcuTime = 0;
 uint16_t volatile tickCnt = 0;
-uint8_t setPoint = 0;
-uint8_t actualValue = 0x55;
-uint8_t pot[4] = {0x55, 0x55, 0x55, 0x55};
+uint8_t setPoint = 0xFF;
+uint8_t duty = 0xFF;
+uint8_t actualValue = 0xFF;
+uint8_t pot[4] = {0xFF, 0xFF, 0xFF, 0xFF};
 uint8_t potCnt = 0;
 uint8_t uartChar = 0xFF;
 uint8_t volatile uartBusy = 0;
 uint8_t volatile int0EnableTime = 0;
 uint16_t volatile timeBetweenEdges = 0;
 uint8_t volatile edgeStatus;
+
+
 void uart_putc_nonblocking(char c)
 {
 	if(uartBusy)
@@ -35,7 +38,7 @@ ISR(TIM0_OVF_vect)
 	 * update setpoint at beginning of a timer fire to 
 	 * avoid aliasing
 	 */
-	OCR0A = setPoint;
+	OCR0A = duty;
 
 	/*
 	 * Fires each 256/9.6M=26.67us, so 1ms is 37.5 fires
@@ -85,16 +88,16 @@ ISR(INT0_vect)
 	}else{	
 		/*
 	  	 * with min 750 rpm and max 3000 rpm, there should be
-	 	 * between 750 -180 ~ 900 - 150 ticks between two edges
+	 	 * between 750 -180 ~ 1024 - 150 ticks between two edges
 	 	 */
 		uint16_t tmp = (tickCnt - lastEdgeTick);
-		if (tmp < 150 || tmp > 900) {
+		if (tmp < 150 || tmp > 1024) {
 			/* somethings not right, remove sample */
-			startEdgeTick += (tickCnt - lastEdgeTick);
+			startEdgeTick += tmp;
 			uart_putc_nonblocking('b');
 		} else {
 			edgeStatus--;
-			timeBetweenEdges = (tickCnt - startEdgeTick);	
+			timeBetweenEdges = (tickCnt - startEdgeTick);
 		}
 		lastEdgeTick = tickCnt;
 	}
@@ -144,7 +147,7 @@ void uart_putuint8(uint8_t i)
 void checkPot (void)
 {
 	if (ADCSRA & (1 << ADSC)) {
-		//TODO: add error, should always be done
+		uart_putc('d');
 		return;
 	}
 	pot[potCnt % 4] = ADCH;
@@ -154,24 +157,36 @@ void checkPot (void)
 
 void updateSetPoint (void)
 {
-	uint8_t averagePot = 0;
-	averagePot += pot[0] >> 2;
-	averagePot += pot[1] >> 2;
-	averagePot += pot[2] >> 2;
-	averagePot += pot[3] >> 2;
-	//avoid to small values, might be problem with updates
-	if (averagePot < 5) {
-		setPoint = 5;
-	} else {
-		setPoint = averagePot; //TODO: should be rpm, not adc
+	int i;
+
+	setPoint = 0;
+	for(i = 0; i < 4; i++) {
+		setPoint += pot[i] >> 2;
 	}
 }
 
-void do8msWork ()
+/*
+ * 1.9.6
+ */
+void updateDutyCycle (void)
 {
-	checkPot();
-	updateSetPoint();
+	static int16_t duty2 = 0x3FFF;
+	int16_t adjust = (setPoint - actualValue) << 4;
+	duty2 += adjust;
+	if(duty2 < (8 << 6)) {
+		duty2 = (8 << 6);
+	} else if (duty2 > (255 << 6)) {
+		duty2 = 0x3FFF;
+	}
+
+	duty = (uint8_t)(duty2 >> 6);
+
+	uart_putuint8(duty);
+	uart_putuint8(setPoint);
+	uart_putuint8(actualValue);
+	uart_putc('\n');
 }
+	
 
 int main (void)
 {
@@ -203,11 +218,11 @@ int main (void)
 	 * output = 9.6MHz/256=37.5kHZ (CS00)
 	 * Fast PWM, TOP = 0xFF mode 3 (WGM=0x3)
 	 * toggle OCOA on compare (COM0A0)
-	 * start at 33% (OCR0A=255/3)
+	 * start at 100% (OCR0A=255)
 	 * enable interrupt on overflow
 	 */
 	TCCR0A = (1 << COM0A1) | (1 << WGM01) | (1 << WGM00);
-	OCR0A  = 0x55;
+	OCR0A  = 0xFF;
 	TIMSK0 = (1 << TOIE0);
 	TCCR0B = (1 << CS00);
 
@@ -236,8 +251,13 @@ int main (void)
 			GIMSK |= (1 << INT0);
 		}
 
-		if ((currentTime & 0x7) == 0) {
-			do8msWork();
+		if ((currentTime & 0x7) == 0 && currentTime < 4*8) {
+			checkPot();
+		}
+
+		if(currentTime == 128) {
+			updateSetPoint();
+			updateDutyCycle();
 		}
 
 		if (currentTime == 255) {
@@ -249,16 +269,18 @@ int main (void)
 				uint16_t tmp = (timeBetweenEdges - 1200) >> 3;
 				tmp = (tmp>>2) + (tmp>>4);
 				if (tmp > 255) {
-					actualValue = 255;
+					actualValue = 0;
 				} else {
-					actualValue = (uint8_t)tmp;
+					actualValue = 255 - (uint8_t)tmp;
 				}
 				GIFR  |= (1 << INTF0);
 				GIMSK |= (1 << INT0);
 				edgeStatus = EDGE_START;
+				//uart_putuint8(actualValue);
+				//uart_putc('\n');
+			} else {
+				uart_putc('c');
 			}
-			uart_putuint8(actualValue);
-			uart_putc('\n');
 		}
 	}
 	return 0;
