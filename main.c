@@ -2,7 +2,7 @@
 #include <avr/interrupt.h>
 
 #define EDGE_IDLE     (0)
-#define EDGE_START    (9)
+#define EDGE_START    (5)
 
 #define STARTBIT (10)
 #define STOPBIT   (1)
@@ -68,29 +68,14 @@ ISR(TIM0_OVF_vect)
 ISR(INT0_vect)
 {
 	static uint16_t startEdgeTick;
-	static uint16_t lastEdgeTick;
 
 	PINB |= (1 << PB3);
 	
 	if(edgeStatus == EDGE_START) {
 		/* this is the first edge */
 		startEdgeTick = tickCnt;
-		lastEdgeTick = tickCnt;
-		edgeStatus--;
 	}else{	
-		/*
-	  	 * with min 750 rpm and max 3000 rpm, there should be
-	 	 * between 750 -180 ~ 1024 - 150 ticks between two edges
-	 	 */
-		uint16_t tmp = (tickCnt - lastEdgeTick);
-		if (tmp < 150 || tmp > 1024) {
-			/* somethings not right, remove sample */
-			startEdgeTick += tmp;
-		} else {
-			edgeStatus--;
-			timeBetweenEdges = (tickCnt - startEdgeTick);
-		}
-		lastEdgeTick = tickCnt;
+		timeBetweenEdges = (tickCnt - startEdgeTick);
 	}
 	/*
 	 * max rpm <3000rpm => 3000/60*2=100Hz
@@ -102,6 +87,7 @@ ISR(INT0_vect)
 	 * interrupt earlier than 1/100*1/2*80%=4ms from now
 	 *
 	 */
+	edgeStatus--;
 	int0EnableTime = mcuTime + 4;
 	GIMSK = ~(1 << INT0);
 }
@@ -141,7 +127,8 @@ void checkPot (void)
 	potCnt++;
 	ADCSRA |= 1 << ADSC;
 }
-
+/* avoid strange effects with too low rpm */
+#define MIN_SETPOINT (0x18)
 void updateSetPoint (void)
 {
 	int i;
@@ -150,12 +137,16 @@ void updateSetPoint (void)
 	for(i = 0; i < 4; i++) {
 		setPoint += pot[i] >> 2;
 	}
+
+	if (setPoint < MIN_SETPOINT) {
+		setPoint = MIN_SETPOINT;
+	}
 }
 
 #define FRACTION_BITS (7)
 #define MAX_DUTY      (0xFF << FRACTION_BITS)
 /* avoid to small duty, that might give the fan and rpm signal problem */
-#define MIN_DUTY      (0x8  << FRACTION_BITS)
+#define MIN_DUTY      (0x2  << FRACTION_BITS)
 void updateDutyCycle (void)
 {
 	/*
@@ -264,12 +255,12 @@ int main (void)
 
 		if (currentTime == 255) {
 			if (edgeStatus == EDGE_IDLE) {
-				/* ticks are between 150 to 900 per edge, 8 edges so
-				 * 1200 < timeBetweenEdges < 7200, scale down and shift
-				 * to 0 -255. (7200-1200)/256~3 ~> t/4+t/16
+				/* ticks are between 170 to 1262 per edge, 4 edges so
+				 * 680 < timeBetweenEdges < 5048, scale down and shift
+				 * to 0 - 255. (5048 - 680)/4/256=4.27 ~ 1/(1/4 - 1/64)
 				 */
-				uint16_t tmp = (timeBetweenEdges - 1200) >> 3;
-				tmp = (tmp>>2) + (tmp>>4);
+				uint16_t tmp = (timeBetweenEdges - 680) >> 2;
+				tmp = (tmp>>2) - (tmp>>6);
 				if (tmp > 255) {
 					actualValue = 0;
 				} else {
@@ -278,7 +269,9 @@ int main (void)
 				edgeStatus = EDGE_START;
 				GIFR  |= (1 << INTF0);
 				GIMSK |= (1 << INT0);
+			/* no pulses, perhaps to low duty to move blades */
 			} else {
+				actualValue = 0;
 				uart_putc('c');
 			}
 		}
