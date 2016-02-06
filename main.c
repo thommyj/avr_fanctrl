@@ -11,7 +11,7 @@
 uint8_t volatile mcuTime = 0;
 uint16_t volatile tickCnt = 0;
 uint8_t setPoint;
-uint8_t duty = 0xFF;
+uint8_t newOCR0A = 0xFF;
 uint8_t actualValue = 0xFF;
 uint8_t pot[4];
 uint8_t potCnt = 0;
@@ -30,7 +30,7 @@ ISR(TIM0_OVF_vect)
 	 * update setpoint at beginning of a timer fire to 
 	 * avoid aliasing
 	 */
-	OCR0A = duty;
+	OCR0A = newOCR0A;
 
 	/*
 	 * Fires each 256/9.6M=26.67us, so 1ms is 37.5 fires
@@ -99,7 +99,7 @@ ISR(INT0_vect)
 	 *  x----^ x----^ x----^ x--
 	 *
 	 * so its safe to say that we shouldn't get a new
-	 * interrupt earlier than 1/100*1/2*5/6=4.17ms from now
+	 * interrupt earlier than 1/100*1/2*80%=4ms from now
 	 *
 	 */
 	int0EnableTime = mcuTime + 4;
@@ -152,23 +152,39 @@ void updateSetPoint (void)
 	}
 }
 
-/*
- * 1.9.6
- */
+#define FRACTION_BITS (7)
+#define MAX_DUTY      (0xFF << FRACTION_BITS)
+/* avoid to small duty, that might give the fan and rpm signal problem */
+#define MIN_DUTY      (0x8  << FRACTION_BITS)
 void updateDutyCycle (void)
 {
-	static int16_t duty2 = 0x3FFF;
-	int16_t adjust = (setPoint - actualValue) << 3;
-	duty2 += adjust;
-	if(duty2 < (8 << 6)) {
-		duty2 = (8 << 6);
-	} else if (duty2 > (255 << 6)) {
-		duty2 = 0x3FFF;
+	/*
+	 * duty uses fixed point arithmetic. The duty programmed in the timer is a 8bit
+	 * unsigned value, but to be able to have a P < 1 it is necessary to
+	 * have fractional bits. To easily notice overflow, 9 integer bits are used,
+	 * which leaves 7 bits for the fractional part.
+	 * 0x7f80 is max allowed value, since that represents 255
+	 *
+	 * adjust calculates the error and how much to adjust the duty cycle. A P value
+	 * of 1/2^4 is used, so max adjustment per update is 255/2^4 < 16. Max value
+	 * in duty after an update is 0x7f80 + 255*2^3 = 34680, a value greater than that
+	 * indicates that there were an underflow
+	 */
+	static uint16_t duty = MAX_DUTY;
+	int16_t adjust = (setPoint - actualValue) << (FRACTION_BITS - 4);
+	duty += adjust;
+	if(duty > 35000 || duty < MIN_DUTY) {
+		duty = MIN_DUTY;
+	} else if (duty > MAX_DUTY) {
+		duty = MAX_DUTY;
 	}
 
-	duty = (uint8_t)(duty2 >> 6);
+	newOCR0A = (uint8_t)(duty >> FRACTION_BITS);
 
-	uart_putuint8(duty);
+/*	uart_putuint8(duty >> 8);
+	uart_putuint8(duty & 0xFF);
+	uart_putc(':');*/
+	uart_putuint8(newOCR0A);
 	uart_putuint8(setPoint);
 	uart_putuint8(actualValue);
 	uart_putc('\n');
@@ -259,9 +275,9 @@ int main (void)
 				} else {
 					actualValue = 255 - (uint8_t)tmp;
 				}
+				edgeStatus = EDGE_START;
 				GIFR  |= (1 << INTF0);
 				GIMSK |= (1 << INT0);
-				edgeStatus = EDGE_START;
 			} else {
 				uart_putc('c');
 			}
