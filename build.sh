@@ -15,7 +15,7 @@ then
 	mv fanctrl.hex fanctrl_old.hex
 fi
 
-avr-gcc -mmcu=attiny13 -Os -Wall main.c -o fanctrl
+avr-gcc -mmcu=attiny13 -Os -Wall -fwhole-program main.c -o fanctrl
 avr-objcopy -R .eeprom -O ihex fanctrl fanctrl.hex
 echo "new build"
 avr-size fanctrl
