@@ -22,14 +22,6 @@ uint16_t volatile timeBetweenEdges = 0;
 uint8_t volatile edgeStatus;
 
 
-void uart_putc_nonblocking(char c)
-{
-	if(uartBusy)
-		return;
-	uartChar = c;
-	uartBusy = STARTBIT;
-}
-
 ISR(TIM0_OVF_vect)
 {
 	static uint8_t nextTick = 37;
@@ -94,7 +86,6 @@ ISR(INT0_vect)
 		if (tmp < 150 || tmp > 1024) {
 			/* somethings not right, remove sample */
 			startEdgeTick += tmp;
-			uart_putc_nonblocking('b');
 		} else {
 			edgeStatus--;
 			timeBetweenEdges = (tickCnt - startEdgeTick);
@@ -126,22 +117,18 @@ void uart_putc(char c)
 	uartBusy = STARTBIT;
 }
 
+void uart_putnibble(uint8_t n)
+{
+	if (n > 0x9)
+		uart_putc(n - 0xA + 'A');
+	else
+		uart_putc(n + '0');
+}
 
 void uart_putuint8(uint8_t i)
 {
-	uint8_t i0 = i & 0xF;
-	uint8_t i1 = i >> 4;
-
-	if (i1 > 0x9)
-		uart_putc(i1 - 0xA + 'A');
-	else
-		uart_putc(i1 + '0');
-
-	if (i0 > 0x9)
-		uart_putc(i0 -0xA + 'A');
-	else
-		uart_putc(i0 + '0');
-
+	uart_putnibble(i & 0xF);
+	uart_putnibble(i >> 4);
 }
 
 void checkPot (void)
@@ -276,8 +263,6 @@ int main (void)
 				GIFR  |= (1 << INTF0);
 				GIMSK |= (1 << INT0);
 				edgeStatus = EDGE_START;
-				//uart_putuint8(actualValue);
-				//uart_putc('\n');
 			} else {
 				uart_putc('c');
 			}
