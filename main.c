@@ -10,12 +10,12 @@
 
 uint8_t volatile mcuTime = 0;
 uint16_t volatile tickCnt = 0;
-uint8_t setPoint = 0xFF;
+uint8_t setPoint;
 uint8_t duty = 0xFF;
 uint8_t actualValue = 0xFF;
-uint8_t pot[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t pot[4];
 uint8_t potCnt = 0;
-uint8_t uartChar = 0xFF;
+uint8_t uartChar = 0;
 uint8_t volatile uartBusy = 0;
 uint8_t volatile int0EnableTime = 0;
 uint16_t volatile timeBetweenEdges = 0;
@@ -127,8 +127,8 @@ void uart_putnibble(uint8_t n)
 
 void uart_putuint8(uint8_t i)
 {
-	uart_putnibble(i & 0xF);
 	uart_putnibble(i >> 4);
+	uart_putnibble(i & 0xF);
 }
 
 void checkPot (void)
@@ -158,7 +158,7 @@ void updateSetPoint (void)
 void updateDutyCycle (void)
 {
 	static int16_t duty2 = 0x3FFF;
-	int16_t adjust = (setPoint - actualValue) << 4;
+	int16_t adjust = (setPoint - actualValue) << 3;
 	duty2 += adjust;
 	if(duty2 < (8 << 6)) {
 		duty2 = (8 << 6);
@@ -177,7 +177,7 @@ void updateDutyCycle (void)
 
 int main (void)
 {
-	uint16_t currentTime;
+	uint8_t currentTime = -1;
 
 	/*
 	 * disable divide by 8 for systemclock
@@ -226,7 +226,6 @@ int main (void)
 
 	sei();
 	edgeStatus = EDGE_START;
-	currentTime = mcuTime;
 	while(1) {
 		while(currentTime == mcuTime) {
 			/* paus work */
