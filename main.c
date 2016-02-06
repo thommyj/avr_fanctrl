@@ -45,7 +45,7 @@ ISR(TIM0_OVF_vect)
 	}
 
 	/* 
- 	 * 26.67 will give a baudrate at 37500, which is 
+	 * 26.67 will give a baudrate at 37500, which is
 	 * close enough to 38400
 	 */
 	if (uartBusy == STARTBIT) {
@@ -155,16 +155,45 @@ void updateDutyCycle (void)
 	 * have fractional bits. To easily notice overflow, 9 integer bits are used,
 	 * which leaves 7 bits for the fractional part.
 	 * 0x7f80 is max allowed value, since that represents 255
-	 *
-	 * adjust calculates the error and how much to adjust the duty cycle. A P value
-	 * of 1/2^4 is used, so max adjustment per update is 255/2^4 < 16. Max value
-	 * in duty after an update is 0x7f80 + 255*2^3 = 34680, a value greater than that
-	 * indicates that there were an underflow
 	 */
 	static uint16_t duty = MAX_DUTY;
-	int16_t adjust = (setPoint - actualValue) << (FRACTION_BITS - 4);
-	duty += adjust;
-	if(duty > 35000 || duty < MIN_DUTY) {
+	static uint8_t  lastSetPoint = 0;
+	uint8_t absSetPointDiff;
+	uint8_t setPointLowered;
+
+	if (lastSetPoint > setPoint) {
+	        absSetPointDiff = lastSetPoint - setPoint;
+	        setPointLowered = 1;
+	} else {
+	        absSetPointDiff = setPoint - lastSetPoint;
+	        setPointLowered = 0;
+	}
+	lastSetPoint = setPoint;
+
+	/*
+	 * large difference in setPoint, use feed forward
+	 */
+	if (absSetPointDiff > 5) {
+	        if (setPointLowered) {
+	                duty -= absSetPointDiff << (FRACTION_BITS - 1);
+	        } else {
+	                duty += absSetPointDiff << (FRACTION_BITS - 1);
+	        }
+	} else {
+	        /* adjust calculates the error and how much to adjust the duty cycle. A P value
+	         * of 1/2^4 is used, so max adjustment per update is 255/2^4 < 16
+	         */
+	        int16_t adjust = (setPoint - actualValue) << (FRACTION_BITS - 4);
+	        duty += adjust;
+	}
+
+	/* Max value in duty after an update from control loop is 0x7f80 + 255*2^3 = 34680, from feed
+	 * forward 0x7f80 + 255*2^6 = 48960 (although very unlikely, that would mean a setPoint=0, but
+	 * max duty). A value greater than that indicates that there were an underflow. When
+	 * underflowing, the min value is 2^16-(255*2^6 - 2^7) = 49344, which is greater than the max
+	 * value when overflowing. So there shouldn't be any risk of confusing the two
+	 */
+	if(duty > 49000 || duty < MIN_DUTY) {
 		duty = MIN_DUTY;
 	} else if (duty > MAX_DUTY) {
 		duty = MAX_DUTY;
