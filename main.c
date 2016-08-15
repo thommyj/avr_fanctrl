@@ -128,85 +128,90 @@ void checkPot (void)
 	ADCSRA |= 1 << ADSC;
 }
 /* avoid strange effects with too low rpm */
-#define MIN_SETPOINT (0x18)
+#define MIN_SETPOINT (0x40)
+#define MAX_SETPOINT (0xFF)
 void updateSetPoint (void)
 {
 	int i;
+	/*8.8 */
+	uint16_t newSetPoint = 0;
 
-	setPoint = 0;
 	for(i = 0; i < 4; i++) {
-		setPoint += pot[i] >> 2;
+		newSetPoint += (pot[i] << 6);
 	}
 
-	if (setPoint < MIN_SETPOINT) {
-		setPoint = MIN_SETPOINT;
-	}
+	newSetPoint = (newSetPoint >> 1) + (newSetPoint >> 2);
+	newSetPoint += (MIN_SETPOINT << 8);
+	setPoint = (newSetPoint >> 8);
 }
 
 #define FRACTION_BITS (7)
 #define MAX_DUTY      (0xFF << FRACTION_BITS)
 /* avoid to small duty, that might give the fan and rpm signal problem */
 #define MIN_DUTY      (0x2  << FRACTION_BITS)
+#define KP            (32) //2^5
+#define MAX_E         (64)
+#define MIN_E         (-64)
+#define KI            (8)  //2^3
 void updateDutyCycle (void)
 {
 	/*
-	 * duty uses fixed point arithmetic. The duty programmed in the timer is a 8bit
-	 * unsigned value, but to be able to have a P < 1 it is necessary to
-	 * have fractional bits. To easily notice overflow, 9 integer bits are used,
-	 * which leaves 7 bits for the fractional part.
-	 * 0x7f80 is max allowed value, since that represents 255
+	 * Values uses fixed point arithmetic to permit fractional K's and to allow
+	 * I part to work properly. The duty programmed in the timer is a 8bit
+	 * unsigned value though.
+	 * 9 integer bits are used, which leaves 7 bits for the fractional part.
+	 * 0x7f80 is max allowed value for u, since that represents 255
 	 */
-	static uint16_t duty = MAX_DUTY;
-	static uint8_t  lastSetPoint = 0;
-	uint8_t absSetPointDiff;
-	uint8_t setPointLowered;
+	static int16_t P = 0;
+	static uint16_t u = 0x7f80;
+	int16_t I = 0;
+	int8_t e;
+	int16_t tmp;
 
-	if (lastSetPoint > setPoint) {
-	        absSetPointDiff = lastSetPoint - setPoint;
-	        setPointLowered = 1;
-	} else {
-	        absSetPointDiff = setPoint - lastSetPoint;
-	        setPointLowered = 0;
-	}
-	lastSetPoint = setPoint;
-
+	/* 
+	 * Avoid to high or low P and I by capping
+	 * the error
+	 */
+	tmp = setPoint - actualValue;
+	if (tmp > MAX_E)
+		e = MAX_E; 
+	else if (tmp < MIN_E)
+		e = MIN_E;
+	else
+		e = setPoint - actualValue;
 	/*
-	 * large difference in setPoint, use feed forward
+	 * u(k) = u(k-1) + deltaP(k) + deltaI(k) =>
+	 * u(k) = u(k-1) + P(k) - P(k-1) + I(k) - I(k-1) =>
+	 * / I(k) = Ki*e(k) + I(k-1) / =>
+	 * u(k) = u(k-1) + P(k) - P(k-1) + Ki*e(k) =>
+	 * / P(x) = Kp*e(x) / =>
+	 * u(k) = u(k-1) + Kp*(e(k)-e(k-1)) + Ki*e(k)
 	 */
-	if (absSetPointDiff > 5) {
-	        if (setPointLowered) {
-	                duty -= absSetPointDiff << (FRACTION_BITS - 1);
-	        } else {
-	                duty += absSetPointDiff << (FRACTION_BITS - 1);
-	        }
-	} else {
-	        /* adjust calculates the error and how much to adjust the duty cycle. A P value
-	         * of 1/2^4 is used, so max adjustment per update is 255/2^4 < 16
-	         */
-	        int16_t adjust = (setPoint - actualValue) << (FRACTION_BITS - 4);
-	        duty += adjust;
-	}
 
-	/* Max value in duty after an update from control loop is 0x7f80 + 255*2^3 = 34680, from feed
-	 * forward 0x7f80 + 255*2^6 = 48960 (although very unlikely, that would mean a setPoint=0, but
-	 * max duty). A value greater than that indicates that there were an underflow. When
-	 * underflowing, the min value is 2^16-(255*2^6 - 2^7) = 49344, which is greater than the max
-	 * value when overflowing. So there shouldn't be any risk of confusing the two
+	u -= P;
+	P = e * KP;
+	/* 
+	 * max u = 0x7f80 + 64*64 = 0x8F80
+	 * min u = 0x0100 - 64*64 = 0xF0FF
 	 */
-	if(duty > 49000 || duty < MIN_DUTY) {
-		duty = MIN_DUTY;
-	} else if (duty > MAX_DUTY) {
-		duty = MAX_DUTY;
-	}
+	u += P;
 
-	newOCR0A = (uint8_t)(duty >> FRACTION_BITS);
+	I = e * KI;
+	/*
+	 * max u = 0x8F80 + 64*8 = 0x9180
+	 * min u = 0xF0FF - 64*8 = 0xEEFF
+	 */
+	u += I;
 
-/*	uart_putuint8(duty >> 8);
-	uart_putuint8(duty & 0xFF);
-	uart_putc(':');*/
+	if (u > 0x9180 || u < MIN_DUTY)
+		u = MIN_DUTY;
+	else if (u > MAX_DUTY)
+		u = MAX_DUTY;
+
+	newOCR0A = (uint8_t)(u >> FRACTION_BITS);
+	uart_putuint8((uint8_t)(P >> FRACTION_BITS));
+	uart_putuint8((uint8_t)e);
 	uart_putuint8(newOCR0A);
-	uart_putuint8(setPoint);
-	uart_putuint8(actualValue);
 	uart_putc('\n');
 }
 	
